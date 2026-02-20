@@ -600,10 +600,11 @@ def main():
     """Main entry point."""
     # Load configuration
     from config.config import get_default_config
-    config = get_default_config()
+    # config = get_default_config()
     
     # Override config for quick testing if needed
-    # config = get_config_for_quick_test()
+    from config.config import get_config_for_quick_test
+    config = get_config_for_quick_test()
     
     # Create trainer
     trainer = DiffusionTrainer(config)
