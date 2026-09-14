@@ -239,7 +239,9 @@ class DiffusionTrainer:
         self.model.train()
         epoch_metrics = {
             'loss': 0.0,
-            'mse': 0.0
+            'mse': 0.0,
+            'physics_loss': 0.0,
+            'identity_loss': 0.0
         }
         
         pbar = tqdm(
@@ -303,6 +305,8 @@ class DiffusionTrainer:
             # Update metrics
             epoch_metrics['loss'] += loss.item()
             epoch_metrics['mse'] += loss_dict['mse']
+            epoch_metrics['physics_loss'] += loss_dict.get('physics_loss', 0.0)
+            epoch_metrics['identity_loss'] += loss_dict.get('identity_loss', 0.0)
             
             # Logging
             if self.global_step % self.config.system.log_every_n_steps == 0:
@@ -600,11 +604,11 @@ def main():
     """Main entry point."""
     # Load configuration
     from config.config import get_default_config
-    # config = get_default_config()
+    config = get_default_config()
     
     # Override config for quick testing if needed
-    from config.config import get_config_for_quick_test
-    config = get_config_for_quick_test()
+    # from config.config import get_config_for_quick_test
+    # config = get_config_for_quick_test()
     
     # Create trainer
     trainer = DiffusionTrainer(config)

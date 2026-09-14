@@ -11,11 +11,21 @@ import os
 @dataclass
 class DataConfig:
     """Data-related configuration"""
-    data_root: str = "./data"
-    img_size: List[int] = field(default_factory=lambda: [256, 256])
-    normalize_mean: List[float] = field(default_factory=lambda: [0.485, 0.456, 0.406])
-    normalize_std: List[float] = field(default_factory=lambda: [0.229, 0.224, 0.225])
+    # Root of the paired RGB-NIR face dataset. For the Tufts layout this folder
+    # must contain train/{VIS,NIR} and val/{VIS,NIR} with matching filenames.
+    data_root: str = "./data/tufts_faces_rgb_nir"
+    dataset_layout: str = "tufts"  # "tufts" (train/val/{VIS,NIR}) or "ranus" (RANUS/{RGB,NIR}/<subject>)
+    # 112x112 to match the FR evaluation contract (DLORD_synthetic_nir must be 112x112).
+    img_size: List[int] = field(default_factory=lambda: [112, 112])
+    # Diffusion works in [-1, 1]; mean=std=0.5 maps [0,1] pixels -> [-1,1].
+    normalize_mean: List[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
+    normalize_std: List[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
+    # NIR is a single band; load it as grayscale replicated across 3 channels so it
+    # matches the 3-channel FR backbone and the eval's PNG save format.
+    nir_as_gray: bool = True
     use_augmentation: bool = True
+    # Only used for the "ranus" layout (which has no predefined split); the Tufts
+    # layout uses its own train/ and val/ folders.
     train_split: float = 0.8
     val_split: float = 0.1
     seed: int = 42
@@ -28,14 +38,32 @@ class ModelConfig:
     out_channels: int = 3  # NIR output
     model_channels: int = 128
     num_res_blocks: int = 2
-    attention_resolutions: List[int] = field(default_factory=lambda: [16, 8])
+    # Spatial resolutions (in pixels) at which to apply attention. With 112x112 input and
+    # channel_mult of length 4 the level resolutions are 112,56,28,14 -> [14] fires at the
+    # deepest level; the 7 covers the 5-level case.
+    attention_resolutions: List[int] = field(default_factory=lambda: [14, 7])
     channel_mult: List[int] = field(default_factory=lambda: [1, 2, 4, 8])
     dropout: float = 0.1
     use_checkpoint: bool = False
 
-    # Physics-informed settings
-    physics_prior_type: str = "learned"   # "learned" or "planck"
-    physics_loss_weight: float = 1.0      # weight for physics loss term
+    # Physics-informed settings.
+    # "reflectance": NIR-appropriate prior (skin/material reflectance in the 700-1000nm
+    #                band, driven mostly by the red channel; melanin absorption drops in NIR).
+    # "learned":     generic learned RGB->NIR head (no physical inductive bias).
+    # "planck":      legacy thermal-emission (blackbody) prior -- physically WRONG for NIR,
+    #                kept only for backward compatibility / ablation.
+    physics_prior_type: str = "reflectance"  # "reflectance" | "learned" | "planck"
+    physics_loss_weight: float = 0.5         # weight for the reflectance-consistency loss
+
+    # --- Identity-preserving loss (frozen face-recognition backbone) ---
+    # The downstream metric is FR verification, so we optimise embedding-space identity
+    # directly. Loss = weighted cosine distance between embeddings of the generated NIR
+    # and the ground-truth NIR (and optionally the RGB source). No-ops if weights missing.
+    identity_loss_weight: float = 0.1
+    identity_model: str = "arcface"                 # "arcface" | "adaface"
+    identity_weights_path: Optional[str] = None     # path to converted_{arc,ada}face_*.pt; None disables
+    identity_use_gt_nir: bool = True                # match embedding(gen_nir) to embedding(gt_nir)
+    identity_use_rgb: bool = False                  # also match embedding(gen_nir) to embedding(rgb)
 
     # Diffusion parameters
     num_timesteps: int = 1000

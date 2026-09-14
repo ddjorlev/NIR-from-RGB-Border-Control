@@ -1,0 +1,5 @@
+.gitignore
+data/RANUS
+output/
+samples/
+dlord_rgb2nir_eval.tar.gz
