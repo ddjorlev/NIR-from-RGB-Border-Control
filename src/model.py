@@ -265,6 +265,70 @@ class Upsample(nn.Module):
 
 
 # ============================================================================
+# Multi-scale RGB conditioning (FiLM)
+# ============================================================================
+
+class RGBFiLMEncoder(nn.Module):
+    """
+    Encodes the RGB condition image into per-resolution FiLM (scale, shift)
+    parameters, one pair per U-Net level. This gives the network direct
+    access to RGB information at every internal resolution, instead of only
+    at the input (via channel-concat, which has to survive many downsample/
+    upsample steps to influence deep or late-decoder layers).
+
+    Mirrors the main U-Net's channel_mult schedule exactly, so the produced
+    (scale, shift) channel counts match the main encoder/decoder's channel
+    counts at every resolution -- indexed by downsampling factor `ds` (1 for
+    full resolution, doubling at each level), since encoder and decoder
+    stages at the same `ds` always share the same channel count by
+    construction.
+    """
+
+    def __init__(self, model_channels: int, channel_mult: Tuple[int, ...]):
+        super().__init__()
+        self.stem = nn.Conv2d(3, model_channels, 3, padding=1)
+        self.stages = nn.ModuleList()
+        self.film_heads = nn.ModuleList()
+        ch = model_channels
+        for mult in channel_mult:
+            out_ch = model_channels * mult
+            self.stages.append(nn.Sequential(
+                nn.Conv2d(ch, out_ch, 3, padding=1),
+                nn.GroupNorm(min(8, out_ch), out_ch),
+                nn.SiLU(),
+            ))
+            self.film_heads.append(nn.Conv2d(out_ch, out_ch * 2, 1))
+            ch = out_ch
+
+    def forward(self, x: torch.Tensor) -> dict:
+        """Returns {ds: (scale, shift)} for ds = 1, 2, 4, ... at each level."""
+        film_by_ds = {}
+        h = self.stem(x)
+        ds = 1
+        for level, (stage, head) in enumerate(zip(self.stages, self.film_heads)):
+            h = stage(h)
+            scale, shift = head(h).chunk(2, dim=1)
+            film_by_ds[ds] = (scale, shift)
+            if level != len(self.stages) - 1:
+                h = F.avg_pool2d(h, 2)
+                ds *= 2
+        return film_by_ds
+
+
+def apply_film(h: torch.Tensor, film_by_ds: dict, ds: int) -> torch.Tensor:
+    """Applies FiLM modulation h * (1 + scale) + shift at resolution `ds`,
+    resizing the FiLM maps to match h's spatial size if they differ
+    (they shouldn't, but guards against off-by-one resolution mismatches)."""
+    if ds not in film_by_ds:
+        return h
+    scale, shift = film_by_ds[ds]
+    if scale.shape[-2:] != h.shape[-2:]:
+        scale = F.interpolate(scale, size=h.shape[-2:], mode='nearest')
+        shift = F.interpolate(shift, size=h.shape[-2:], mode='nearest')
+    return h * (1 + scale) + shift
+
+
+# ============================================================================
 # Main UNet Model
 # ============================================================================
 
@@ -285,17 +349,26 @@ class PhysicsInformedUNet(nn.Module):
         dropout: float = 0.1,
         time_embed_dim: int = 512,
         use_physics: bool = True,
-        condition_on_rgb: bool = True
+        condition_on_rgb: bool = True,
+        image_size: int = 128,
+        use_film_conditioning: bool = False
     ):
         super().__init__()
-        
+
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.model_channels = model_channels
         self.num_res_blocks = num_res_blocks
         self.use_physics = use_physics
         self.condition_on_rgb = condition_on_rgb
-        
+        self.image_size = image_size
+        self.use_film_conditioning = use_film_conditioning
+
+        # Multi-scale RGB conditioning: gives every internal resolution
+        # direct access to RGB features, on top of the input-level concat.
+        if use_film_conditioning:
+            self.rgb_film_encoder = RGBFiLMEncoder(model_channels, channel_mult)
+
         # Time embedding
         self.time_embed = TimeEmbedding(model_channels, time_embed_dim)
         
@@ -315,10 +388,11 @@ class PhysicsInformedUNet(nn.Module):
         
         ch = model_channels
         input_block_chans = [ch]
-        
+        ds = 1  # current downsampling factor relative to image_size
+
         for level, mult in enumerate(channel_mult):
             out_ch = model_channels * mult
-            
+
             for block_idx in range(num_res_blocks):
                 layers = ResidualBlock(
                     ch, out_ch, time_embed_dim, dropout, use_physics
@@ -326,20 +400,24 @@ class PhysicsInformedUNet(nn.Module):
                 self.encoder_blocks.append(layers)
                 ch = out_ch
                 input_block_chans.append(ch)
-                
-                # Add attention at specified resolutions
-                if level in attention_resolutions or (2**level) in attention_resolutions:
+
+                # Add attention when this block's actual feature-map resolution
+                # (image_size / current downsampling factor) matches a requested
+                # resolution, rather than a level-index coincidence.
+                current_res = image_size // ds
+                if current_res in attention_resolutions:
                     self.encoder_attns.append(
                         AttentionBlock(ch, num_heads=8, use_physics=use_physics)
                     )
                 else:
                     self.encoder_attns.append(nn.Identity())
-                
+
                 # For each residual block append an explicit downsample placeholder:
                 # only the last block in a level performs actual downsampling (except last level)
                 if (block_idx == num_res_blocks - 1) and (level != len(channel_mult) - 1):
                     self.downsample_layers.append(Downsample(ch))
                     input_block_chans.append(ch)
+                    ds *= 2
                 else:
                     self.downsample_layers.append(nn.Identity())
         
@@ -353,13 +431,18 @@ class PhysicsInformedUNet(nn.Module):
         )
         
         # Decoder (upsampling path)
+        # NOTE: upsample_layers is kept flat and aligned 1:1 with decoder_blocks
+        # (mirroring the encoder's downsample_layers alignment with encoder_blocks)
+        # so that zip() in forward() doesn't silently truncate the block list.
         self.decoder_blocks = nn.ModuleList()
         self.decoder_attns = nn.ModuleList()
         self.upsample_layers = nn.ModuleList()
-        
+
+        num_levels = len(channel_mult)
+        ds = 2 ** (num_levels - 1)  # matches the encoder's ds at the bottleneck
         for level, mult in enumerate(reversed(channel_mult)):
             out_ch = model_channels * mult
-            
+
             for i in range(num_res_blocks + 1):
                 ich = input_block_chans.pop()
                 layers = ResidualBlock(
@@ -367,21 +450,23 @@ class PhysicsInformedUNet(nn.Module):
                 )
                 self.decoder_blocks.append(layers)
                 ch = out_ch
-                
-                # Add attention at specified resolutions
-                res_level = len(channel_mult) - 1 - level
-                if res_level in attention_resolutions or (2**res_level) in attention_resolutions:
+
+                # Add attention when this block's actual feature-map resolution
+                # matches a requested resolution (mirrors the encoder's logic).
+                current_res = image_size // ds
+                if current_res in attention_resolutions:
                     self.decoder_attns.append(
                         AttentionBlock(ch, num_heads=8, use_physics=use_physics)
                     )
                 else:
                     self.decoder_attns.append(nn.Identity())
-            
-            # Upsample (except last level)
-            if level != len(channel_mult) - 1:
-                self.upsample_layers.append(Upsample(ch))
-            else:
-                self.upsample_layers.append(nn.Identity())
+
+                # Upsample after the last block of this level (except the final level)
+                if i == num_res_blocks and level != num_levels - 1:
+                    self.upsample_layers.append(Upsample(ch))
+                    ds //= 2
+                else:
+                    self.upsample_layers.append(nn.Identity())
         
         # Output layers
         self.output_layers = nn.Sequential(
@@ -409,32 +494,42 @@ class PhysicsInformedUNet(nn.Module):
         """
         # Time embedding
         t_emb = self.time_embed(timesteps)
-        
+
+        # Multi-scale RGB FiLM conditioning (independent of the input concat
+        # below): gives every resolution direct access to RGB features.
+        film_by_ds = self.rgb_film_encoder(condition) if (self.use_film_conditioning and condition is not None) else None
+
         # Concatenate with RGB condition if using conditional generation
         if self.condition_on_rgb and condition is not None:
             x = torch.cat([x, condition], dim=1)
-        
+
         # Initial convolution
         h = self.input_conv(x)
-        
+
         # Encoder
         encoder_features = [h]
-        
+        ds = 1
+
         for i, (block, attn, downsample) in enumerate(
             zip(self.encoder_blocks, self.encoder_attns, self.downsample_layers)
         ):
             h = block(h, t_emb)
             h = attn(h)
+            if film_by_ds is not None:
+                h = apply_film(h, film_by_ds, ds)
             encoder_features.append(h)
             h = downsample(h)
             if not isinstance(downsample, nn.Identity):
+                ds *= 2
                 encoder_features.append(h)
-        
+
         # Middle
         h = self.middle_block1(h, t_emb)
         h = self.middle_attn(h)
         h = self.middle_block2(h, t_emb)
-        
+        if film_by_ds is not None:
+            h = apply_film(h, film_by_ds, ds)
+
         # Decoder
         for i, (block, attn, upsample) in enumerate(
             zip(self.decoder_blocks, self.decoder_attns, self.upsample_layers)
@@ -443,8 +538,12 @@ class PhysicsInformedUNet(nn.Module):
             h = torch.cat([h, skip], dim=1)
             h = block(h, t_emb)
             h = attn(h)
+            if film_by_ds is not None:
+                h = apply_film(h, film_by_ds, ds)
             h = upsample(h)
-        
+            if not isinstance(upsample, nn.Identity):
+                ds //= 2
+
         # Output
         return self.output_layers(h)
 
@@ -655,7 +754,9 @@ class PIDModel(nn.Module):
             attention_resolutions=tuple(config.model.attention_resolutions),
             dropout=config.model.dropout,
             use_physics=True,
-            condition_on_rgb=config.model.condition_on_rgb
+            condition_on_rgb=config.model.condition_on_rgb,
+            image_size=config.data.img_size[0],
+            use_film_conditioning=getattr(config.model, 'use_film_conditioning', False)
         )
 
         # Physics prior: either learned mapping (RGB -> NIR) or simple planck-like prior
@@ -664,6 +765,13 @@ class PIDModel(nn.Module):
             # small learned physics head: RGB -> NIR prior
             self.physics_head = nn.Sequential(
                 nn.Conv2d(3, 32, kernel_size=3, padding=1),
+                nn.GroupNorm(8, 32),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(32, 64, kernel_size=3, padding=1),
+                nn.GroupNorm(8, 64),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(64, 32, kernel_size=3, padding=1),
+                nn.GroupNorm(8, 32),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(32, self.unet.out_channels, kernel_size=3, padding=1)
             )
@@ -689,17 +797,50 @@ class PIDModel(nn.Module):
             beta_end=config.model.beta_end
         )
 
+        # Optional perceptual (LPIPS) loss on the one-step x0 reconstruction,
+        # to combat the blurriness inherent to pure pixel-MSE diffusion
+        # training. Frozen -- not trained, only used to compute a loss term.
+        self.use_perceptual_loss = getattr(config.model, 'use_perceptual_loss', False)
+        if self.use_perceptual_loss:
+            import lpips
+            self.lpips_loss_fn = lpips.LPIPS(net='alex')
+            for p in self.lpips_loss_fn.parameters():
+                p.requires_grad = False
+
+        self.use_channel_consistency_loss = getattr(config.model, 'use_channel_consistency_loss', False)
+
         logger.info(f"Initialized PID model with {sum(p.numel() for p in self.parameters()):,} parameters")
     
     def forward(
-        self, 
-        x: torch.Tensor, 
+        self,
+        x: torch.Tensor,
         t: torch.Tensor,
         condition: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Forward pass through the model."""
         return self.unet(x, t, condition)
-    
+
+    @torch.no_grad()
+    def sample(
+        self,
+        condition: torch.Tensor,
+        num_steps: int = 50,
+        eta: float = 0.0
+    ) -> torch.Tensor:
+        """
+        Generate NIR images from RGB condition images via DDIM sampling.
+        """
+        device = condition.device
+        shape = (condition.shape[0], self.unet.out_channels, condition.shape[2], condition.shape[3])
+        return self.diffusion.ddim_sample(
+            model=self,
+            shape=shape,
+            condition=condition,
+            num_steps=num_steps,
+            eta=eta,
+            device=device
+        )
+
     def compute_loss(
         self,
         nir_images: torch.Tensor,
@@ -732,9 +873,9 @@ class PIDModel(nn.Module):
 
         # --- physics-informed term: reconstruct x0 and compare to physics prior ---
         # compute predicted x0 from predicted_noise (same formula used in DDPM)
-        alpha_t = self.diffusion.alphas[t][:, None, None, None].to(device)
-        sqrt_one_minus_alphas_cumprod_t = self.diffusion.sqrt_one_minus_alphas_cumprod[t][:, None, None, None].to(device)
-        sqrt_recip_alpha_t = self.diffusion.sqrt_recip_alphas[t][:, None, None, None].to(device)
+        alpha_t = self.diffusion.alphas.to(device)[t][:, None, None, None]
+        sqrt_one_minus_alphas_cumprod_t = self.diffusion.sqrt_one_minus_alphas_cumprod.to(device)[t][:, None, None, None]
+        sqrt_recip_alpha_t = self.diffusion.sqrt_recip_alphas.to(device)[t][:, None, None, None]
 
         pred_x0 = sqrt_recip_alpha_t * (
             noisy_nir - ((1 - alpha_t) / (sqrt_one_minus_alphas_cumprod_t + 1e-12)) * predicted_noise
@@ -755,14 +896,35 @@ class PIDModel(nn.Module):
         phys_weight = getattr(self.config.model, 'physics_loss_weight', 0.0)
         physics_loss = F.l1_loss(pred_x0, physics_pred)
 
-        # total loss
         loss = mse_loss + phys_weight * physics_loss
+
+        # --- optional channel-consistency loss: penalize per-pixel variance
+        # across the 3 output channels. Real NIR is essentially single-
+        # channel (often stored as 3 duplicated channels), so this directly
+        # discourages the color-tint artifact the model otherwise develops
+        # from predicting the 3 channels independently. ---
+        channel_consistency_loss = torch.tensor(0.0, device=device)
+        if self.use_channel_consistency_loss:
+            channel_consistency_weight = getattr(self.config.model, 'channel_consistency_weight', 0.1)
+            channel_consistency_loss = pred_x0.var(dim=1, unbiased=False).mean()
+            loss = loss + channel_consistency_weight * channel_consistency_loss
+
+        # --- optional perceptual (LPIPS) loss on the x0 reconstruction, to
+        # combat blur from pure pixel-MSE training. ---
+        perceptual_loss = torch.tensor(0.0, device=device)
+        if self.use_perceptual_loss:
+            perceptual_weight = getattr(self.config.model, 'perceptual_loss_weight', 0.1)
+            self.lpips_loss_fn.to(device)
+            perceptual_loss = self.lpips_loss_fn(pred_x0, nir_images).mean()
+            loss = loss + perceptual_weight * perceptual_loss
 
         if return_dict:
             return {
                 'loss': loss,
                 'mse': mse_loss.item(),
                 'physics_loss': physics_loss.item() if isinstance(physics_loss, torch.Tensor) else float(physics_loss),
+                'channel_consistency_loss': channel_consistency_loss.item() if isinstance(channel_consistency_loss, torch.Tensor) else float(channel_consistency_loss),
+                'perceptual_loss': perceptual_loss.item() if isinstance(perceptual_loss, torch.Tensor) else float(perceptual_loss),
                 'predicted_noise_mean': predicted_noise.mean().item(),
                 'predicted_noise_std': predicted_noise.std().item()
             }

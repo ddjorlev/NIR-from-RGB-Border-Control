@@ -1,0 +1,21 @@
+backbone,method,fpr_target,mean_tpr_pct,ci_lower_pct,ci_upper_pct
+adaface,PID Diffusion v1 (ours),0.1,94.902,94.358,95.451
+adaface,PID Diffusion v1 (ours),0.01,71.487,70.358,72.625
+adaface,PID Diffusion v1 (ours),0.001,40.103,38.868,41.328
+adaface,PID Diffusion v1 (ours),0.0001,15.697,14.692,16.701
+adaface,PID Diffusion v1 (ours),1e-05,5.094,4.340,5.787
+adaface,"PID Diffusion v2, fixed attn (ours)",0.1,96.311,95.837,96.769
+adaface,"PID Diffusion v2, fixed attn (ours)",0.01,74.472,73.380,75.551
+adaface,"PID Diffusion v2, fixed attn (ours)",0.001,42.876,41.649,44.109
+adaface,"PID Diffusion v2, fixed attn (ours)",0.0001,16.119,15.158,17.071
+adaface,"PID Diffusion v2, fixed attn (ours)",1e-05,4.842,4.195,5.642
+arcface,PID Diffusion v1 (ours),0.1,94.489,93.908,95.049
+arcface,PID Diffusion v1 (ours),0.01,70.663,69.507,71.805
+arcface,PID Diffusion v1 (ours),0.001,41.524,40.283,42.758
+arcface,PID Diffusion v1 (ours),0.0001,18.314,17.248,19.386
+arcface,PID Diffusion v1 (ours),1e-05,6.099,5.369,6.880
+arcface,"PID Diffusion v2, fixed attn (ours)",0.1,95.535,95.017,96.046
+arcface,"PID Diffusion v2, fixed attn (ours)",0.01,74.558,73.477,75.647
+arcface,"PID Diffusion v2, fixed attn (ours)",0.001,46.532,45.282,47.790
+arcface,"PID Diffusion v2, fixed attn (ours)",0.0001,21.668,20.543,22.810
+arcface,"PID Diffusion v2, fixed attn (ours)",1e-05,7.520,6.687,8.391

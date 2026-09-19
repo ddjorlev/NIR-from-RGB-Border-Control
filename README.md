@@ -1,193 +1,154 @@
-# NIR-from-RGB Border Control Diffusion Model
+# RGB2NIR: Physics-Informed Diffusion for Face NIR Synthesis
 
-A state-of-the-art diffusion model for generating Near-Infrared (NIR) thermal images from RGB inputs, specifically designed for border control and surveillance applications using the FLIR ADAS dataset.
+A conditional diffusion model that generates near-infrared (NIR) face images
+from RGB input, for cross-spectral face verification in a border-control
+setting (OnMoveID). The approach is inspired by Physics-Informed Diffusion
+(PID, originally proposed for RGB-to-thermal/LWIR generation), adapted here
+to NIR: since NIR is reflected light rather than emitted heat, the
+Planck's-law / black-body radiation prior used in the original PID paper
+does not apply, and is replaced with a learned reflectance-prior head
+trained jointly with the denoiser.
 
-## 🌟 Features
+Full training details, results, and discussion are in the project report;
+this README documents the codebase itself.
 
-- **Advanced Diffusion Architecture**: Custom UNet with attention mechanisms optimized for thermal image generation
-- **FLIR ADAS Dataset Integration**: Seamless loading and preprocessing of thermal imaging data
-- **Robust Training Pipeline**: Mixed precision training, gradient accumulation, and EMA for stable convergence  
-- **Advanced Data Augmentation**: Specialized augmentations for thermal-RGB image pairs including MixUp and CutMix
-- **Comprehensive Monitoring**: Weights & Biases integration with sample generation and metric tracking
-- **Flexible Configuration**: Dataclass-based configuration system for easy experimentation
+## Architecture
 
-## 🏗️ Architecture
+A conditional U-Net DDPM operating directly in pixel space (no VAE / latent
+space, unlike the original PID paper):
 
-The model uses a **U-Net based diffusion architecture** with:
-- **Sinusoidal time embeddings** for diffusion timestep conditioning
-- **Multi-scale residual blocks** with group normalization and SiLU activations
-- **Multi-head self-attention** at multiple resolutions for spatial relationships
-- **Skip connections** between encoder and decoder for detail preservation
-- **DDIM sampling** for fast inference with configurable steps
+- **RGB conditioning**: the RGB image is channel-concatenated with the noisy
+  NIR image at the U-Net's input.
+- **Timestep conditioning**: sinusoidal embeddings injected into every
+  residual block.
+- **Self-attention**: multi-head attention at selected resolutions, tracked
+  by actual feature-map resolution (not level index) so it lands where
+  configured.
+- **Reflectance-prior head**: a 4-layer convolutional network (GroupNorm +
+  ReLU) predicts NIR reflectance directly from the RGB image and supplies an
+  auxiliary L1 consistency target for the denoiser's clean-image estimate
+  $\hat{x}_0$, in place of PID's separately pretrained physical-decomposition
+  network. It is used only during training; DDIM sampling at inference time
+  conditions on RGB alone.
+- **Optional extensions** (`config/config.py`, disabled by default): FiLM
+  conditioning at every internal resolution, a channel-consistency loss, and
+  a perceptual (LPIPS) loss — implemented and evaluated as an ablation, but
+  did not improve on the base model (see report).
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 NIR-from-RGB-Border-Control/
-├── config.py              # Configuration management
+├── config/
+│   └── config.py                    # Dataclass configs; get_config_for_tufts_faces_v2()
+│                                     # is the reported/final model
 ├── src/
-│   └── data.py            # Dataset and data loading utilities  
-├── dataloader.py          # Advanced data pipeline with augmentations
-├── train.py               # Complete training script with diffusion model
-├── run_training.py        # Quick start script
-├── requirements.txt       # Python dependencies
-├── data/                  # FLIR ADAS dataset directory
-│   └── FLIR ADAS priv 1000.v1-oryginal.multiclass/
-│       ├── train/         # Training images and labels
-│       ├── valid/         # Validation images and labels  
-│       └── test/          # Test images and labels (optional)
-├── checkpoints/           # Model checkpoints (auto-created)
-├── logs/                  # Training logs (auto-created)
-└── samples/               # Generated sample images (auto-created)
+│   ├── model.py                     # PIDModel, U-Net, reflectance-prior head, FiLM
+│   ├── data.py                      # PairedFolderDataset/DataModule (Tufts layout)
+│   ├── dataloader.py                # Dataloader construction, batch preparation
+│   ├── train.py                     # Training loop, checkpointing, resume logic
+│   ├── main.py                      # Entry point (reads PID_CONFIG env var)
+│   └── export_dlord_synthetic_nir.py  # Batched RGB->synthetic-NIR export for DLORD
+├── analysis/
+│   ├── make_sample_grid.py          # Qualitative RGB / real-NIR / generated-NIR grid
+│   ├── compute_validation_metrics.py  # PSNR / SSIM / RMSE / LPIPS on Tufts val split
+│   └── plot_training_curve.py
+├── dlord_rgbnir_verification/       # Mentor-provided DLORD Protocol A evaluation
+│   ├── DLORD_rgb2nir/                 # Raw RGB/NIR video dataset (per identity)
+│   ├── DLORD_synthetic_nir_PID_v2/    # Our model's synthetic NIR output (reported)
+│   ├── tufts_faces_rgb_nir/            # Aligned RGB-NIR face pairs used for training
+│   ├── extract_embeddings.py / evaluate_protocol_A.py  # ArcFace/AdaFace verification
+│   └── pid_diffusion_v2_results.txt    # Reported TPR@FPR results
+├── slurm/                           # SLURM job scripts (training, export, eval, analysis)
+├── checkpoints_tufts_v2/            # Final model checkpoints
+├── samples_tufts_v2/                # Periodic training-time sample grids
+└── requirements.txt
 ```
 
-## 🚀 Quick Start
-
-### 1. Install Dependencies
+## Setup
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Prepare Dataset
+Dataset: `dlord_rgbnir_verification/tufts_faces_rgb_nir/` (Tufts Face
+Database RGB-NIR pairs, matched by filename: 1,970 train / 143 validation
+pairs). DLORD evaluation data lives in
+`dlord_rgbnir_verification/DLORD_rgb2nir/` (see that folder's own README for
+the evaluation protocol, provided by the course).
 
-Ensure your FLIR ADAS dataset is structured as:
-```
-data/FLIR ADAS priv 1000.v1-oryginal.multiclass/
-├── train/
-│   ├── *.jpg              # Training images
-│   └── _classes.csv       # Labels file
-├── valid/
-│   ├── *.jpg              # Validation images  
-│   └── _classes.csv       # Labels file
-└── test/ (optional)
-```
+## Training
 
-### 3. Start Training
+Configs are selected via the `PID_CONFIG` environment variable
+(`src/main.py` / `src/train.py`):
 
-**Option A: Quick Start**
 ```bash
-python run_training.py
+export PID_CONFIG=tufts_faces_v2   # the reported/final model
+python -m src.main
 ```
 
-**Option B: Direct Training**
+or via SLURM: `sbatch slurm/train_tufts_v2.sbatch`.
+
+Key hyperparameters for the reported model (`get_config_for_tufts_faces_v2`
+in `config/config.py`): 128x128 images, batch size 32, AdamW with cosine
+learning-rate schedule, mixed precision, 1,000 diffusion steps (linear
+noise schedule 1e-4 to 0.02), 64 base U-Net channels, channel multipliers
+(1,2,2,4), attention at resolutions 32 and 16, reflectance-prior loss weight
+0.5, 300 epochs. Checkpoint selection: minimum validation loss. Raw
+(non-EMA) weights are used for inference/evaluation — EMA decay would need
+far more steps than this run's budget to converge away from random init.
+
+Two other configs are also implemented and documented in
+`config/config.py`: `tufts_faces` (an earlier iteration with a coarser
+attention-resolution heuristic and a larger, more overparameterized U-Net)
+and `tufts_faces_v3` (an ablation adding FiLM conditioning, a
+channel-consistency loss, a perceptual loss, and longer training — did not
+improve on v2; kept for documentation of what was tried).
+
+## Inference / Export
+
+`src/export_dlord_synthetic_nir.py` converts RGB frames to synthetic NIR in
+batches, with `--shard-index`/`--num-shards` for parallelizing across a
+SLURM job array (`slurm/export_dlord_v2_array.sbatch`). Output is written
+to `dlord_rgbnir_verification/DLORD_synthetic_nir_PID_v2/`, preserving the
+input directory structure as required by the evaluation protocol.
+
+## Evaluation
+
+Two complementary evaluations are used:
+
+1. **Paired image-quality metrics** on the Tufts validation split (PSNR,
+   SSIM, RMSE, LPIPS) via `analysis/compute_validation_metrics.py`, since
+   Tufts pairs are spatially aligned.
+2. **DLORD Protocol A** cross-spectral face verification (`ArcFace`/
+   `AdaFace` embeddings, TPR@FPR with stratified bootstrap 95% CIs) via
+   `dlord_rgbnir_verification/`, since DLORD's RGB and NIR videos are
+   *not* spatially/temporally aligned and require identity-level rather
+   than pixel-level comparison.
+
 ```bash
-python train.py
+python analysis/make_sample_grid.py --checkpoint checkpoints_tufts_v2/checkpoint_best.pt \
+    --out dlord_rgbnir_verification/analysis/figures/qualitative.png
+python analysis/compute_validation_metrics.py --checkpoint checkpoints_tufts_v2/checkpoint_best.pt --tag v2
+
+cd dlord_rgbnir_verification
+bash 01_extract_embeddings_pid_v2.sh
+bash 02_eval_protocol_A_pid_v2.sh
 ```
 
-### 4. Monitor Progress
+## Results (summary)
 
-- **Sample Images**: Check `./samples/` for generated images during training
-- **Checkpoints**: Model saves to `./checkpoints/` every 5000 steps
-- **Weights & Biases**: View real-time metrics at [wandb.ai](https://wandb.ai)
+See the project report for full tables, plots, and discussion. On DLORD
+Protocol A (ArcFace, TPR@FPR), the model improves on a Tufts-trained
+Pix2Pix reference at every operating point, though both translation
+methods remain below the untranslated RGB-vs-NIR baseline. On the Tufts
+validation split: PSNR 15.3 dB, SSIM 0.657, RMSE 0.181, LPIPS 0.322.
+Qualitatively, facial structure and pose are recovered well; a mild
+color-tint artifact and some blur remain (see report for discussion).
 
-## ⚙️ Configuration
+## Acknowledgments
 
-The model is highly configurable through `config.py`. Key settings:
-
-### Model Architecture
-```python
-model_channels = 128        # Base channel count
-channel_mult = (1,1,2,2,4,4) # Channel multipliers
-num_res_blocks = 2          # Residual blocks per level
-attention_resolutions = (32,16,8) # Attention at these resolutions
-```
-
-### Training Parameters
-```python
-batch_size = 8              # Adjust based on GPU memory
-learning_rate = 1e-4        # Learning rate
-num_epochs = 500            # Training epochs
-mixed_precision = True      # Use automatic mixed precision
-```
-
-### Diffusion Settings
-```python
-noise_steps = 1000          # Diffusion timesteps
-beta_start = 0.0001         # Noise schedule start
-beta_end = 0.02             # Noise schedule end
-ddim_steps = 50             # Sampling steps for inference
-```
-
-## 📊 Dataset Details
-
-The FLIR ADAS dataset contains thermal images with vehicle and pedestrian annotations:
-- **Classes**: `car`, `person` (binary labels)
-- **Format**: RGB-format thermal images (simulated RGB pairs generated)
-- **Augmentations**: Spatial transforms, color jitter, noise injection
-- **Preprocessing**: Resize to 256×256, normalization, thermal enhancement
-
-## 🔬 Model Details
-
-### Diffusion Process
-1. **Forward Process**: Gradually add Gaussian noise to NIR images over T timesteps
-2. **Reverse Process**: Learn to denoise and generate NIR from RGB + noise
-3. **Training**: Predict noise added at random timesteps
-4. **Sampling**: Generate NIR via iterative denoising from pure noise
-
-### Loss Function
-- **Primary**: L2 loss between predicted and actual noise
-- **Options**: L1, Huber loss for different noise characteristics
-- **Regularization**: Gradient clipping, weight decay, EMA averaging
-
-### Advanced Features
-- **Time Conditioning**: Sinusoidal embeddings for timestep information
-- **Attention Mechanisms**: Multi-head self-attention for spatial relationships
-- **Skip Connections**: U-Net architecture preserves fine details
-- **Mixed Precision**: Faster training with maintained accuracy
-
-## 📈 Training Tips
-
-### GPU Memory Optimization
-- Reduce `batch_size` if out of memory (try 4 or 2)
-- Enable `gradient_checkpointing` for memory savings
-- Use `accumulate_grad_batches` for effective larger batch sizes
-
-### Hyperparameter Tuning
-- **Learning Rate**: Start with 1e-4, adjust based on loss curves
-- **Noise Schedule**: Cosine schedule often works better than linear
-- **Sampling Steps**: More steps = better quality but slower inference
-
-### Monitoring Training
-- Watch sample images for visual quality improvement
-- Monitor loss convergence (should steadily decrease)
-- Check attention maps for meaningful feature learning
-
-## 🎯 Use Cases
-
-This model is designed for:
-- **Border Security**: Generate thermal signatures from visible images
-- **Surveillance Enhancement**: Create NIR views for better night vision
-- **Data Augmentation**: Expand thermal datasets using RGB images
-- **Cross-Modal Translation**: Research in visible-to-thermal conversion
-
-## 🔬 Research Applications
-
-- Study thermal signature patterns in different weather conditions
-- Analyze vehicle vs. pedestrian heat signatures
-- Investigate domain adaptation between visible and thermal spectra
-- Develop improved night vision and low-light surveillance systems
-
-## 🤝 Contributing
-
-This is a research project. For improvements or extensions:
-1. Fork the repository
-2. Create a feature branch
-3. Implement changes with proper documentation
-4. Submit a pull request with detailed description
-
-## 📄 License
-
-This project is intended for academic and research purposes. Please check dataset licensing requirements for commercial use.
-
-## 🙏 Acknowledgments
-
-- **FLIR ADAS Dataset**: Thermal imaging data for automotive applications
-- **Hugging Face Diffusers**: Inspiration for diffusion model architecture
-- **PyTorch Team**: Deep learning framework and utilities
-
----
-
-**Happy Training! 🚀**
-
-For questions or issues, please check the logs in `./logs/` and ensure all requirements are properly installed.
+- Tufts Face Database (RGB-NIR pairs) for training data.
+- DLORD dataset and Protocol A evaluation framework, provided by the course.
+- PID (arXiv:2407.09299) for the physics-informed diffusion formulation
+  this work adapts from LWIR to NIR.

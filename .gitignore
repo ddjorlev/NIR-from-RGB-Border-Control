@@ -1,0 +1,41 @@
+slurm/logs
+
+# Model checkpoints (hundreds of MB - hundreds of GB, don't belong in git)
+checkpoints/
+checkpoints_tufts/
+checkpoints_tufts_v2/
+checkpoints_tufts_v2_shallow_prior_backup/
+checkpoints_tufts_v3/
+
+# Training-run outputs / logs / sample grids
+output/
+output_tufts/
+output_tufts_v2/
+output_tufts_v3/
+samples/
+samples_tufts/
+samples_tufts_v2/
+samples_tufts_v3/
+
+# DLORD evaluation data/pipeline: raw dataset, generated synthetic NIR,
+# pretrained FR models, and cached embeddings are all huge binary files
+dlord_rgbnir_verification/DLORD_rgb2nir/
+dlord_rgbnir_verification/DLORD_synthetic_nir/
+dlord_rgbnir_verification/DLORD_synthetic_nir_PID_v2/
+dlord_rgbnir_verification/DLORD_synthetic_nir_PID_v3/
+dlord_rgbnir_verification/tufts_faces_rgb_nir/
+dlord_rgbnir_verification/dlord_embeddings/
+dlord_rgbnir_verification/converted_adaface_ir101_ms1mv3.pt
+dlord_rgbnir_verification/converted_arcface_r100_ms1mv3.pt
+dlord_rgbnir_verification/protocol_A_agnostic_pairs.csv
+dlord_rgbnir_verification/dlord_flat_mids_fids.csv
+dlord_rgbnir_verification/slurm_logs/
+
+# Python bytecode caches
+__pycache__/
+*.pyc
+
+# Generic large/binary checkpoint and embedding extensions, wherever they appear
+*.pt
+*.pth
+*.ckpt

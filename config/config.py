@@ -12,6 +12,7 @@ import os
 class DataConfig:
     """Data-related configuration"""
     data_root: str = "./data"
+    dataset_type: str = "ranus"  # "ranus" or "paired_folder" (e.g. Tufts VIS/NIR layout)
     img_size: List[int] = field(default_factory=lambda: [256, 256])
     normalize_mean: List[float] = field(default_factory=lambda: [0.485, 0.456, 0.406])
     normalize_std: List[float] = field(default_factory=lambda: [0.229, 0.224, 0.225])
@@ -46,6 +47,16 @@ class ModelConfig:
     # Conditioning
     use_conditional: bool = True
     condition_on_rgb: bool = True
+
+    # Multi-scale RGB conditioning (FiLM at every U-Net resolution, on top
+    # of the input-level channel-concat)
+    use_film_conditioning: bool = False
+
+    # Optional extra loss terms (see PIDModel.compute_loss)
+    use_channel_consistency_loss: bool = False
+    channel_consistency_weight: float = 0.1
+    use_perceptual_loss: bool = False
+    perceptual_loss_weight: float = 0.1
 
 @dataclass
 class TrainingConfig:
@@ -235,6 +246,108 @@ def get_config_for_cpu() -> Config:
     
     return config
 
+def get_config_for_tufts_faces() -> Config:
+    """
+    Config for training PID on the Tufts Face RGB-NIR paired dataset
+    (aligned face crops, provided for finetuning/training the RGB2NIR generator
+    used in the DLORD Protocol A face-verification evaluation).
+    """
+    config = Config()
+
+    config.data.data_root = "../archive_extract/dlord_rgbnir_verification/tufts_faces_rgb_nir"
+    config.data.dataset_type = "paired_folder"
+    config.data.img_size = [128, 128]
+
+    # NIR here is reflected-light (700-1000nm), not thermal emission, so the
+    # "learned" RGB->NIR prior head is used instead of the Planck/blackbody one.
+    config.model.physics_prior_type = "learned"
+    config.model.physics_loss_weight = 0.5
+    config.model.model_channels = 128
+    config.model.channel_mult = [1, 2, 2, 4]
+    config.model.attention_resolutions = [16, 8]
+
+    config.training.batch_size = 32
+    config.training.num_epochs = 300
+    config.training.val_every_n_epochs = 5
+    config.training.save_samples_every_n_epochs = 5
+    config.training.save_every_n_epochs = 10
+    # EMA decay=0.9999 (the dataclass default) needs ~10k steps to converge;
+    # this run only has ~300 epochs x ~61 iters/epoch = ~18.3k steps total,
+    # so a slower decay would leave EMA weights still dominated by the random
+    # init for most of training (verified: raw weights at epoch 165 produced
+    # real faces, default-decay EMA weights were still noise). Use a decay
+    # whose ~1/(1-decay) time constant fits this run's step budget.
+    config.training.ema_decay = 0.995
+
+    config.system.checkpoint_dir = "./checkpoints_tufts"
+    config.system.output_dir = "./output_tufts"
+    config.system.sample_dir = "./samples_tufts"
+    config.system.use_wandb = False
+
+    return config
+
+def get_config_for_tufts_faces_v2() -> Config:
+    """
+    v2 of the Tufts training config, addressing two issues found while
+    auditing the v1 run:
+      1. attention_resolutions was matched against level-index heuristics
+         (2**level) instead of actual feature-map resolution, so
+         self-attention (which helps capture long-range facial structure
+         instead of just local blur) was under-applied. Now fixed in
+         PhysicsInformedUNet to track real resolution; this config also
+         requests two attention points (32 and 16) that are both reachable
+         with this depth, instead of one.
+      2. 82M params for only 1970 training pairs is a large model:data
+         ratio and a plausible cause of the loss plateau seen in v1;
+         model_channels is roughly halved here.
+    physics_loss_weight is left unchanged from v1 to isolate the effect of
+    these two changes for comparison.
+    """
+    config = get_config_for_tufts_faces()
+
+    config.model.model_channels = 64
+    config.model.attention_resolutions = [32, 16]
+
+    config.system.checkpoint_dir = "./checkpoints_tufts_v2"
+    config.system.output_dir = "./output_tufts_v2"
+    config.system.sample_dir = "./samples_tufts_v2"
+
+    return config
+
+def get_config_for_tufts_faces_v3() -> Config:
+    """
+    v3: builds on v2 (which already includes the deeper, 4-layer reflectance
+    prior head -- see PIDModel.__init__) and adds three further changes,
+    each independently motivated by an audit of v2's results:
+      1. Multi-scale RGB FiLM conditioning: v2 only injects RGB via a
+         channel-concat at the input, which has to survive many downsample/
+         upsample steps to influence deep or late-decoder layers. FiLM gives
+         every internal resolution direct access to RGB features.
+      2. Channel-consistency loss: penalizes per-pixel variance across the
+         3 output channels, directly targeting the color-tint artifact
+         v2 still showed despite its deeper physics head.
+      3. Perceptual (LPIPS) loss on the x0 reconstruction, to combat the
+         blurriness inherent to pure pixel-MSE diffusion training.
+    Also trains longer (450 vs 300 epochs) since v2's best checkpoints kept
+    landing late in training; the cosine schedule is naturally rescaled to
+    the new epoch count since this is a fresh run, not a resumed one.
+    """
+    config = get_config_for_tufts_faces_v2()
+
+    config.model.use_film_conditioning = True
+    config.model.use_channel_consistency_loss = True
+    config.model.channel_consistency_weight = 0.1
+    config.model.use_perceptual_loss = True
+    config.model.perceptual_loss_weight = 0.1
+
+    config.training.num_epochs = 450
+
+    config.system.checkpoint_dir = "./checkpoints_tufts_v3"
+    config.system.output_dir = "./output_tufts_v3"
+    config.system.sample_dir = "./samples_tufts_v3"
+
+    return config
+
 def get_config_for_high_res() -> Config:
     """Get configuration for high-resolution training (512x512)."""
     config = Config()
@@ -261,5 +374,8 @@ __all__ = [
     'get_default_config',
     'get_config_for_quick_test',
     'get_config_for_cpu',
-    'get_config_for_high_res'
+    'get_config_for_high_res',
+    'get_config_for_tufts_faces',
+    'get_config_for_tufts_faces_v2',
+    'get_config_for_tufts_faces_v3'
 ]

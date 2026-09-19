@@ -1,0 +1,21 @@
+backbone,method,fpr_target,mean_tpr_pct,ci_lower_pct,ci_upper_pct
+adaface,Pix2Pix GAN,0.1,95.965,95.467,96.431
+adaface,Pix2Pix GAN,0.01,73.811,72.705,74.875
+adaface,Pix2Pix GAN,0.001,43.872,42.630,45.121
+adaface,Pix2Pix GAN,0.0001,17.046,16.026,18.052
+adaface,Pix2Pix GAN,1e-05,5.235,4.485,5.996
+adaface,"RGB -> NIR (baseline, no translation)",0.1,99.175,98.939,99.389
+adaface,"RGB -> NIR (baseline, no translation)",0.01,89.474,88.683,90.243
+adaface,"RGB -> NIR (baseline, no translation)",0.001,66.783,65.584,67.947
+adaface,"RGB -> NIR (baseline, no translation)",0.0001,40.751,39.254,42.196
+adaface,"RGB -> NIR (baseline, no translation)",1e-05,17.338,15.914,18.776
+arcface,Pix2Pix GAN,0.1,95.130,94.583,95.644
+arcface,Pix2Pix GAN,0.01,72.790,71.661,73.911
+arcface,Pix2Pix GAN,0.001,42.978,41.730,44.221
+arcface,Pix2Pix GAN,0.0001,18.734,17.698,19.756
+arcface,Pix2Pix GAN,1e-05,6.706,5.851,7.555
+arcface,"RGB -> NIR (baseline, no translation)",0.1,98.795,98.521,99.068
+arcface,"RGB -> NIR (baseline, no translation)",0.01,88.167,87.349,88.973
+arcface,"RGB -> NIR (baseline, no translation)",0.001,66.262,65.054,67.433
+arcface,"RGB -> NIR (baseline, no translation)",0.0001,41.523,40.090,42.984
+arcface,"RGB -> NIR (baseline, no translation)",1e-05,19.371,17.682,21.026

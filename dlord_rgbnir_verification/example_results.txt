@@ -1,0 +1,88 @@
+==================================================
+RUNNING: arcface RGB2NIR baseline
+HARDWARE: CUDA | SEED: 42
+==================================================
+Loading datasets...
+Processing source templates...
+Processing target templates...
+Computing cosine similarities (Vectorized)...
+
+Score Arrays Built: 6221 Genuine | 12983381 Impostor
+
+Running Stratified Bootstrap (10000 iterations) on CUDA...
+
+==================================================
+FINAL RESULTS (95% Confidence Intervals)
+==================================================
+TPR @ FPR 1e-1: 	 98.80%  [98.52% - 99.05%]
+TPR @ FPR 1e-2: 	 88.17%  [87.38% - 88.96%]
+TPR @ FPR 1e-3: 	 66.26%  [65.05% - 67.45%]
+TPR @ FPR 1e-4: 	 41.53%  [40.07% - 42.97%]
+TPR @ FPR 1e-5: 	 19.37%  [17.68% - 21.03%]
+==================================================
+==================================================
+RUNNING: arcface pix2pix GAN synthetic NIR to real NIR
+HARDWARE: CUDA | SEED: 42
+==================================================
+Loading datasets...
+Processing source templates...
+Processing target templates...
+Computing cosine similarities (Vectorized)...
+
+Score Arrays Built: 6221 Genuine | 12983381 Impostor
+
+Running Stratified Bootstrap (10000 iterations) on CUDA...
+
+==================================================
+FINAL RESULTS (95% Confidence Intervals)
+==================================================
+TPR @ FPR 1e-1: 	 95.13%  [94.60% - 95.66%]
+TPR @ FPR 1e-2: 	 72.79%  [71.68% - 73.91%]
+TPR @ FPR 1e-3: 	 42.96%  [41.71% - 44.19%]
+TPR @ FPR 1e-4: 	 18.72%  [17.70% - 19.76%]
+TPR @ FPR 1e-5: 	 6.71%  [5.88% - 7.54%]
+==================================================
+==================================================
+RUNNING: adaface RGB2NIR baseline
+HARDWARE: CUDA | SEED: 42
+==================================================
+Loading datasets...
+Processing source templates...
+Processing target templates...
+Computing cosine similarities (Vectorized)...
+
+Score Arrays Built: 6221 Genuine | 12983381 Impostor
+
+Running Stratified Bootstrap (10000 iterations) on CUDA...
+
+==================================================
+FINAL RESULTS (95% Confidence Intervals)
+==================================================
+TPR @ FPR 1e-1: 	 99.18%  [98.94% - 99.39%]
+TPR @ FPR 1e-2: 	 89.48%  [88.70% - 90.23%]
+TPR @ FPR 1e-3: 	 66.79%  [65.58% - 67.98%]
+TPR @ FPR 1e-4: 	 40.76%  [39.32% - 42.21%]
+TPR @ FPR 1e-5: 	 17.33%  [15.91% - 18.81%]
+==================================================
+==================================================
+RUNNING: adaface pix2pix GAN synthetic NIR to real NIR
+HARDWARE: CUDA | SEED: 42
+==================================================
+Loading datasets...
+Processing source templates...
+Processing target templates...
+Computing cosine similarities (Vectorized)...
+
+Score Arrays Built: 6221 Genuine | 12983381 Impostor
+
+Running Stratified Bootstrap (10000 iterations) on CUDA...
+
+==================================================
+FINAL RESULTS (95% Confidence Intervals)
+==================================================
+TPR @ FPR 1e-1: 	 95.97%  [95.47% - 96.45%]
+TPR @ FPR 1e-2: 	 73.80%  [72.72% - 74.91%]
+TPR @ FPR 1e-3: 	 43.85%  [42.60% - 45.11%]
+TPR @ FPR 1e-4: 	 17.04%  [16.01% - 18.05%]
+TPR @ FPR 1e-5: 	 5.23%  [4.48% - 5.98%]
+==================================================

@@ -232,6 +232,186 @@ class RANUSDataset(Dataset):
             }
         }
 
+class PairedFolderDataset(Dataset):
+    """
+    Generic paired RGB(VIS)-NIR dataset for folder layouts where each split
+    has flat `VIS/` and `NIR/` subfolders with matching filenames (e.g. the
+    Tufts Face RGB-NIR dataset provided for finetuning/training).
+
+    Expected layout:
+        data_root/<split>/VIS/*.jpg
+        data_root/<split>/NIR/*.jpg
+    where `<split>` is one of "train", "val". "test" falls back to "val"
+    since the Tufts package does not ship a separate test split.
+    """
+
+    def __init__(
+        self,
+        data_root: str,
+        split: str = "train",
+        img_size: Tuple[int, int] = (256, 256),
+        normalize_mean: Tuple[float, float, float] = (0.485, 0.456, 0.406),
+        normalize_std: Tuple[float, float, float] = (0.229, 0.224, 0.225),
+        use_augmentation: bool = True,
+        train_split: float = 0.8,
+        val_split: float = 0.1,
+        seed: int = 42
+    ):
+        self.data_root = Path(data_root)
+        self.split = split
+        self.img_size = img_size
+        self.use_augmentation = use_augmentation and split == "train"
+
+        folder_split = "val" if split in ("val", "valid", "test") else split
+        self.vis_root = self.data_root / folder_split / "VIS"
+        self.nir_root = self.data_root / folder_split / "NIR"
+
+        if not self.vis_root.exists() or not self.nir_root.exists():
+            raise ValueError(
+                f"Dataset not found at {self.data_root}/{folder_split}. "
+                f"Expected VIS/ and NIR/ folders with matching filenames."
+            )
+
+        self.image_pairs = self._load_paired_images()
+
+        self.transform = self._setup_transforms(normalize_mean, normalize_std)
+        self.augment_transform = self._setup_augmentation() if self.use_augmentation else None
+
+        logger.info(f"Loaded {len(self.image_pairs)} image pairs from {split} split ({self.vis_root})")
+
+    def _load_paired_images(self) -> List[Dict[str, Path]]:
+        exts = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff')
+        vis_images = sorted([p for p in self.vis_root.iterdir() if p.suffix.lower() in exts])
+        nir_map = {p.name: p for p in self.nir_root.iterdir() if p.suffix.lower() in exts}
+
+        paired_images = []
+        for vis_path in vis_images:
+            nir_path = nir_map.get(vis_path.name)
+            if nir_path is None:
+                candidates = list(self.nir_root.glob(f"{vis_path.stem}.*"))
+                nir_path = candidates[0] if candidates else None
+
+            if nir_path is None or not nir_path.exists():
+                logger.warning(f"Missing NIR image for {vis_path}, skipping...")
+                continue
+
+            paired_images.append({
+                'rgb': vis_path,
+                'nir': nir_path,
+                'subject_id': vis_path.stem,
+                'filename': vis_path.name
+            })
+
+        return paired_images
+
+    def _setup_transforms(self, mean, std) -> transforms.Compose:
+        return transforms.Compose([
+            transforms.Resize(self.img_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std)
+        ])
+
+    def _setup_augmentation(self) -> transforms.Compose:
+        return transforms.Compose([
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(degrees=10),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1))
+        ])
+
+    def _load_image(self, image_path: Path) -> Image.Image:
+        try:
+            return Image.open(image_path).convert('RGB')
+        except Exception as e:
+            logger.error(f"Error loading image {image_path}: {e}")
+            return Image.new('RGB', self.img_size, color=(128, 128, 128))
+
+    def __len__(self) -> int:
+        return len(self.image_pairs)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        pair = self.image_pairs[idx]
+
+        rgb_img = self._load_image(pair['rgb'])
+        nir_img = self._load_image(pair['nir'])
+
+        if self.augment_transform is not None:
+            seed = np.random.randint(2147483647)
+
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            rgb_img = self.augment_transform(rgb_img)
+
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            nir_img = self.augment_transform(nir_img)
+
+        rgb_tensor = self.transform(rgb_img)
+        nir_tensor = self.transform(nir_img)
+
+        return {
+            'rgb': rgb_tensor,
+            'nir': nir_tensor,
+            'metadata': {
+                'subject_id': pair['subject_id'],
+                'filename': pair['filename'],
+                'split': self.split
+            }
+        }
+
+
+class PairedFolderDataModule:
+    """Data module for the generic paired VIS/NIR folder dataset (e.g. Tufts)."""
+
+    def __init__(self, config):
+        self.config = config
+        self.train_dataset = None
+        self.val_dataset = None
+        self.test_dataset = None
+
+    def setup(self):
+        data_config = self.config.data
+
+        self.train_dataset = PairedFolderDataset(
+            data_root=data_config.data_root,
+            split="train",
+            img_size=tuple(data_config.img_size),
+            normalize_mean=tuple(data_config.normalize_mean),
+            normalize_std=tuple(data_config.normalize_std),
+            use_augmentation=data_config.use_augmentation,
+            train_split=data_config.train_split,
+            val_split=data_config.val_split,
+            seed=data_config.seed
+        )
+
+        self.val_dataset = PairedFolderDataset(
+            data_root=data_config.data_root,
+            split="val",
+            img_size=tuple(data_config.img_size),
+            normalize_mean=tuple(data_config.normalize_mean),
+            normalize_std=tuple(data_config.normalize_std),
+            use_augmentation=False,
+            train_split=data_config.train_split,
+            val_split=data_config.val_split,
+            seed=data_config.seed
+        )
+
+        # Tufts ships no separate test split; reuse val.
+        self.test_dataset = self.val_dataset
+
+        logger.info(f"Dataset setup complete - Train: {len(self.train_dataset)}, "
+                   f"Val: {len(self.val_dataset)}, Test: {len(self.test_dataset)}")
+
+    def train_dataloader(self):
+        return self.train_dataset
+
+    def val_dataloader(self):
+        return self.val_dataset
+
+    def test_dataloader(self):
+        return self.test_dataset
+
+
 class RANUSDataModule:
     """
     Data module for RANUS dataset handling train/val/test splits.
@@ -334,7 +514,9 @@ def save_image_grid(images: torch.Tensor, path: str, nrow: int = 4):
 
 __all__ = [
     'RANUSDataset',
-    'RANUSDataModule', 
+    'RANUSDataModule',
+    'PairedFolderDataset',
+    'PairedFolderDataModule',
     'denormalize_image',
     'save_image_grid'
 ]

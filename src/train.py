@@ -22,7 +22,7 @@ from datetime import datetime
 sys.path.append(str(Path(__file__).parent.parent))
 
 from src.model import PIDModel
-from src.data import RANUSDataModule, denormalize_image, save_image_grid
+from src.data import RANUSDataModule, PairedFolderDataModule, denormalize_image, save_image_grid
 from src.dataloader import create_dataloaders, prepare_diffusion_batch
 from config.config import Config
 
@@ -118,7 +118,13 @@ class DiffusionTrainer:
         
         # Initialize data
         logger.info("Loading data...")
-        self.data_module = RANUSDataModule(config)
+        dataset_type = getattr(config.data, 'dataset_type', 'ranus')
+        if dataset_type == 'paired_folder':
+            self.data_module = PairedFolderDataModule(config)
+        elif dataset_type == 'ranus':
+            self.data_module = RANUSDataModule(config)
+        else:
+            raise ValueError(f"Unknown dataset_type: {dataset_type}")
         self.train_loader, self.val_loader, self.test_loader = create_dataloaders(
             config, self.data_module
         )
@@ -519,7 +525,7 @@ class DiffusionTrainer:
     def load_checkpoint(self, checkpoint_path: str):
         """Load model checkpoint."""
         logger.info(f"Loading checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -599,26 +605,40 @@ class DiffusionTrainer:
 def main():
     """Main entry point."""
     # Load configuration
-    from config.config import get_default_config
-    config = get_default_config()
-    
-    # Override config for quick testing if needed
-    # config = get_config_for_quick_test()
-    
+    from config.config import get_default_config, get_config_for_tufts_faces, get_config_for_tufts_faces_v2, get_config_for_tufts_faces_v3
+
+    config_name = os.environ.get('PID_CONFIG', 'default')
+    if config_name == 'tufts_faces':
+        config = get_config_for_tufts_faces()
+    elif config_name == 'tufts_faces_v2':
+        config = get_config_for_tufts_faces_v2()
+    elif config_name == 'tufts_faces_v3':
+        config = get_config_for_tufts_faces_v3()
+    else:
+        config = get_default_config()
+
     # Create trainer
     trainer = DiffusionTrainer(config)
-    
+
     # Check for existing checkpoint to resume from
     latest_checkpoint = os.path.join(
         config.system.checkpoint_dir,
         'checkpoint_latest.pt'
     )
-    
+
     if os.path.exists(latest_checkpoint):
-        response = input(f"Found checkpoint at {latest_checkpoint}. Resume? (y/n): ")
-        if response.lower() == 'y':
+        # Non-interactive (e.g. SLURM batch) runs always auto-resume; only
+        # prompt when attached to a real terminal.
+        if sys.stdin.isatty():
+            response = input(f"Found checkpoint at {latest_checkpoint}. Resume? (y/n): ")
+            should_resume = response.lower() == 'y'
+        else:
+            logger.info(f"Non-interactive run: auto-resuming from {latest_checkpoint}")
+            should_resume = True
+
+        if should_resume:
             trainer.load_checkpoint(latest_checkpoint)
-    
+
     # Start training
     trainer.train()
 
